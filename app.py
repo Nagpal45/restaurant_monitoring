@@ -15,112 +15,77 @@ Base.metadata.create_all(engine)
 def index():
     return "Hello World"
 
-def convert_to_local_time(timestamp_utc, timezone_dict, store_id):
-    timezone_str = timezone_dict.get(store_id, 'America/Chicago')
-    timezone = pytz.timezone(timezone_str)
-    timestamp_local = timestamp_utc.astimezone(timezone)
-    return timestamp_local
-
-def get_timezone_offset(timezone_str):
-    tz = pytz.timezone(timezone_str)
-    now = datetime.now()
-    offset = tz.utcoffset(now)
-    return offset.total_seconds() / 3600
-
 def generate_report_data():
     try:
         timezone_data = {tz.store_id: tz.timezone_str for tz in session.query(Timezone).all()}
-    except Exception as e:
-        print(f"Error fetching timezone data: {e}")
-        return []
-
-    try:
         business_hours_data = {bh.store_id: (bh.start_time_local.strftime('%H:%M:%S'), bh.end_time_local.strftime('%H:%M:%S')) for bh in session.query(BusinessHours).all()}
+        store_activities = session.query(StoreActivity).all()
     except Exception as e:
-        print(f"Error fetching business hours data: {e}")
+        print(f"Error fetching data: {e}")
         return []
 
-    store_activities = session.query(StoreActivity).all()
+    max_timestamp = max(activity.timestamp_utc for activity in store_activities)
 
-    report_data = []
+    def get_offset_hours(timezone_str):
+        tz = pytz.timezone(timezone_str)
+        return tz.utcoffset(max_timestamp).total_seconds() / 3600
+
+    def is_active(activity_time, start_time, end_time):
+        return start_time <= activity_time.strftime('%H:%M:%S') <= end_time
+
+    store_activity_dict = {}
     for activity in store_activities:
-        offset_hours = get_timezone_offset(timezone_data.get(activity.store_id, 'America/Chicago'))
-        timestamp_local = activity.timestamp_utc + timedelta(hours=offset_hours)
-        timestamp_local_truncated = timestamp_local.replace(microsecond=0)
-        activity_time = timestamp_local_truncated.time()
         store_id = activity.store_id
+        if store_id not in store_activity_dict:
+            store_activity_dict[store_id] = []
 
-        if business_hours_data.get(store_id):
-            start_time, end_time = business_hours_data[store_id]
-        else:
-            start_time = "00:00:00"
-            end_time = "23:59:59"
-        if start_time <= activity_time.strftime('%H:%M:%S') <= end_time:
-            if activity.status == 'active':
-                report_data.append({'store_id': store_id, 'timestamp_utc': activity.timestamp_utc, 'status': 'active'})
-            else:
-                report_data.append({'store_id': store_id, 'timestamp_utc': activity.timestamp_utc, 'status': 'not active'})
-    print(report_data)
+        timezone_offset = get_offset_hours(timezone_data.get(store_id, 'America/Chicago'))
+        timestamp_local = activity.timestamp_utc + timedelta(hours=timezone_offset)
+
+        start_time, end_time = business_hours_data.get(store_id, ("00:00:00", "23:59:59"))
+        if is_active(timestamp_local, start_time, end_time):
+            status = 'active' if activity.status == 'active' else 'not active'
+            store_activity_dict[store_id].append({'timestamp_utc': activity.timestamp_utc, 'status': status})
 
     final_report_data = []
-    for store_id in set(data['store_id'] for data in report_data):
-        uptime_last_hour = 0
-        downtime_last_hour = 0
-        uptime_last_day = 0
-        downtime_last_day = 0
-        uptime_last_day_duration = 0
-        downtime_last_day_duration = 0
+    for store_id, activities in store_activity_dict.items():
+        uptime_last_hour = sum(1 for activity in activities if activity['timestamp_utc'].hour == max_timestamp.hour and activity['status'] == 'active') * 15
+        downtime_last_hour = sum(1 for activity in activities if activity['timestamp_utc'].hour == max_timestamp.hour and activity['status'] != 'active') * 15
 
-        store_activities = [activity for activity in report_data if activity['store_id'] == store_id]
+        uptime_last_day = sum(1 for activity in activities if activity['timestamp_utc'].date() == max_timestamp.date() and is_active(activity['timestamp_utc'], *business_hours_data.get(store_id, ("00:00:00", "23:59:59"))) and activity['status'] == 'active')
+        downtime_last_day = sum(1 for activity in activities if activity['timestamp_utc'].date() == max_timestamp.date() and is_active(activity['timestamp_utc'], *business_hours_data.get(store_id, ("00:00:00", "23:59:59"))) and activity['status'] != 'active')
 
-        for activity in store_activities:
-            if activity['timestamp_utc'].hour == datetime.now().hour:
-                if activity['status'] == 'active':
-                    uptime_last_hour += 1
-                else:
-                    downtime_last_hour += 1
+        start_time, end_time = business_hours_data.get(store_id, ("00:00:00", "23:59:59"))
+        business_hours_minutes = (datetime.strptime(end_time, '%H:%M:%S').hour - datetime.strptime(start_time, '%H:%M:%S').hour) * 60
 
-        uptime_last_hour_duration = uptime_last_hour * 60
-        downtime_last_hour_duration = downtime_last_hour * 60
+        max_day = max(bh.day for bh in session.query(BusinessHours).filter_by(store_id=store_id).all()) if session.query(BusinessHours).filter_by(store_id=store_id).count() > 0 else 6
 
-        if business_hours_data.get(store_id):
-            start_time, end_time = business_hours_data[store_id]
-            business_hours_minutes = (datetime.strptime(end_time, '%H:%M:%S').hour - datetime.strptime(start_time, '%H:%M:%S').hour) * 60
+        uptime_last_day_duration = uptime_last_day / 60 * business_hours_minutes
+        downtime_last_day_duration = downtime_last_day / 60 * business_hours_minutes
 
-            for activity in store_activities:
-                activity_date = activity['timestamp_utc'].date()
-                if activity_date == datetime.now().date():
-                    activity_time = activity['timestamp_utc'].replace(microsecond=0).time()
-                    if start_time <= activity_time.strftime('%H:%M:%S') <= end_time:
-                        if activity['status'] == 'active':
-                            uptime_last_day += 1
-                        else:
-                            downtime_last_day += 1
+        if uptime_last_hour > 60:
+            uptime_last_hour = 60 - downtime_last_hour
+        if downtime_last_hour > 60:
+            downtime_last_hour = 60 - uptime_last_hour
 
-            uptime_last_day_duration = (uptime_last_day / 60) * business_hours_minutes
-            downtime_last_day_duration = (downtime_last_day / 60) * business_hours_minutes
+        uptime_last_hour = min(uptime_last_hour, uptime_last_day_duration)
+        downtime_last_hour = min(downtime_last_hour, downtime_last_day_duration)
 
-        uptime_last_week = uptime_last_day * 24 * 7
-        downtime_last_week = downtime_last_day * 24 * 7
+        uptime_last_week = uptime_last_day * 24 * (max_day + 1)
+        downtime_last_week = downtime_last_day * 24 * (max_day + 1)
 
         final_report_data.append({
             'store_id': store_id,
-            'uptime_last_hour': uptime_last_hour_duration,
-            'downtime_last_hour': downtime_last_hour_duration,
+            'uptime_last_hour': uptime_last_hour,
+            'downtime_last_hour': downtime_last_hour,
             'uptime_last_day': uptime_last_day_duration,
             'downtime_last_day': downtime_last_day_duration,
             'uptime_last_week': uptime_last_week,
             'downtime_last_week': downtime_last_week
         })
-        print(f"Report Data (store_id: {store_id}):")
-        print(f"  Uptime Last Hour: {uptime_last_hour_duration} minutes")
-        print(f"  Downtime Last Hour: {downtime_last_hour_duration} minutes")
-        print(f"  Uptime Last Day: {uptime_last_day_duration} minutes")
-        print(f"  Downtime Last Day: {downtime_last_day_duration} minutes")
-        print(f"  Uptime Last Week: {uptime_last_week} minutes")
-        print(f"  Downtime Last Week: {downtime_last_week} minutes")
 
     return final_report_data
+
 
 @app.route('/trigger_report', methods=['POST'])
 def trigger_report():
