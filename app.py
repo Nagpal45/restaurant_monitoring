@@ -128,7 +128,7 @@ def get_report():
     report_file = f'report_{report_id}.csv'
 
     if os.path.isfile(report_file):
-        return send_file(report_file, as_attachment=True)
+        return send_file(report_file, as_attachment=True), jsonify({'status': 'Completed'})
     else:
         return jsonify({'status': 'Running'})
 
