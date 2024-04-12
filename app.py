@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, redirect
 from models import Base, Timezone, BusinessHours, StoreActivity
 from dbConnect import engine, session
 from datetime import datetime, timedelta
@@ -7,6 +7,7 @@ import pandas as pd
 import uuid
 from flask_caching import Cache
 import os
+import threading
 
 app = Flask(__name__)
 
@@ -104,26 +105,22 @@ def generate_report_data(timezone_data, business_hours_data, store_activities):
 
     return final_report_data
 
-@app.route('/trigger_report', methods=['POST'])
-def trigger_report():
+def background_report_generation(report_id):
     timezone_data = get_timezone_data()
     business_hours_data = get_business_hours_data()
     store_activities = get_store_activities()
 
     report_data = generate_report_data(timezone_data, business_hours_data, store_activities)
-    report_id = str(uuid.uuid4())
     report_csv_path = f'report_{report_id}.csv'
 
     report_df = pd.DataFrame(report_data)
     report_df.to_csv(report_csv_path, index=False)
 
-    session.close()
-
-    return jsonify({
-        'report_id': report_id,
-        'status': 'Completed',
-        'report_data': report_data
-    })
+@app.route('/trigger_report', methods=['GET'])
+def trigger_report():
+    report_id = str(uuid.uuid4())
+    threading.Thread(target=background_report_generation, args=(report_id,)).start()
+    return jsonify({'report_id': report_id, 'status': 'Running'})
 
 @app.route('/get_report', methods=['GET'])
 def get_report():
