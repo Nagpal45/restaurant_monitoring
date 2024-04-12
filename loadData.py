@@ -1,4 +1,3 @@
-import pandas as pd
 from sqlalchemy.orm import sessionmaker
 from models import StoreActivity, BusinessHours, Timezone
 from dbConnect import engine
@@ -53,10 +52,7 @@ def load_timezone_data():
     if timezone_data:
         batch_insert_records(Timezone, timezone_data)
 
-# Load data into database
 load_store_activity_data()
 load_business_hours_data()
 load_timezone_data()
-
-# Close the session
 session.close()

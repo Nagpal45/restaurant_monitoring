@@ -5,9 +5,18 @@ from datetime import datetime, timedelta
 import pytz
 import pandas as pd
 import uuid
+from flask_caching import Cache
 import os
 
 app = Flask(__name__)
+
+CACHE_CONFIG = {
+    'CACHE_TYPE': 'simple',  
+    'CACHE_DEFAULT_TIMEOUT': 3600
+}
+
+cache = Cache(config=CACHE_CONFIG)
+cache.init_app(app)
 
 Base.metadata.create_all(engine)
 
@@ -15,16 +24,25 @@ Base.metadata.create_all(engine)
 def index():
     return "Hello World"
 
-def generate_report_data():
+@cache.cached(timeout=3600, key_prefix='timezone_data')
+def get_timezone_data():
+    return {tz.store_id: tz.timezone_str for tz in session.query(Timezone.store_id, Timezone.timezone_str)}
+
+@cache.cached(timeout=3600, key_prefix='business_hours_data')
+def get_business_hours_data():
+    return {bh.store_id: (bh.start_time_local.strftime('%H:%M:%S'), bh.end_time_local.strftime('%H:%M:%S')) for bh in session.query(BusinessHours.store_id, BusinessHours.start_time_local, BusinessHours.end_time_local)}
+
+@cache.cached(timeout=3600, key_prefix='store_activities')
+def get_store_activities():
+    return session.query(StoreActivity).all()
+
+@cache.memoize(timeout=3600)
+def generate_report_data(timezone_data, business_hours_data, store_activities):
     try:
-        timezone_data = {tz.store_id: tz.timezone_str for tz in session.query(Timezone).all()}
-        business_hours_data = {bh.store_id: (bh.start_time_local.strftime('%H:%M:%S'), bh.end_time_local.strftime('%H:%M:%S')) for bh in session.query(BusinessHours).all()}
-        store_activities = session.query(StoreActivity).all()
+        max_timestamp = max(activity.timestamp_utc for activity in store_activities)
     except Exception as e:
         print(f"Error fetching data: {e}")
         return []
-
-    max_timestamp = max(activity.timestamp_utc for activity in store_activities)
 
     def get_offset_hours(timezone_str):
         tz = pytz.timezone(timezone_str)
@@ -86,10 +104,13 @@ def generate_report_data():
 
     return final_report_data
 
-
 @app.route('/trigger_report', methods=['POST'])
 def trigger_report():
-    report_data = generate_report_data()
+    timezone_data = get_timezone_data()
+    business_hours_data = get_business_hours_data()
+    store_activities = get_store_activities()
+
+    report_data = generate_report_data(timezone_data, business_hours_data, store_activities)
     report_id = str(uuid.uuid4())
     report_csv_path = f'report_{report_id}.csv'
 
